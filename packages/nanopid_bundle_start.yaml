@@ -20,7 +20,7 @@ script:
     sequence:
       - service: mqtt.publish
         data:
-          topic: "nanopid/YOUR_DEVICE_MAC/command"
+          topic: "nanopid/24587c5cd104/command"
           qos: 1
           payload: >-
             {"cmd":"start",
