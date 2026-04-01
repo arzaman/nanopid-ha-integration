@@ -276,15 +276,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register the service once; subsequent entries reuse the same registration
     if not hass.services.has_service(DOMAIN, SERVICE_BUNDLED_START):
-    async def _bundled_start_handler(call: ServiceCall) -> None:
-        await _async_handle_bundled_start(hass, call)
-    
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_BUNDLED_START,
-        _bundled_start_handler,
-        schema=SERVICE_BUNDLED_START_SCHEMA,
-    )
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_BUNDLED_START,
+            lambda call: hass.async_create_task(
+                _async_handle_bundled_start(hass, call)
+            ),
+            schema=SERVICE_BUNDLED_START_SCHEMA,
+        )
 
     # Auto-create the Lovelace dashboard on first install (idempotent)
     hass.async_create_task(_async_create_lovelace_dashboard(hass, coordinator))
