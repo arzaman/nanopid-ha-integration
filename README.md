@@ -77,9 +77,13 @@ After setup, all entities are available immediately. No YAML configuration requi
 
 ## Dashboard
 
-Copy `lovelace/nanopid_dashboard.yaml` content into a new Lovelace raw YAML view.
+The dashboard is created **automatically** when the integration is set up via config flow. It appears in the HA sidebar as a new view named after your configured device name (e.g. "NanoPID").
 
-Required HACS frontend cards:
+Entity IDs in the dashboard are derived from the device name at creation time. If you change the device name later, re-create the dashboard by deleting it in HA and restarting the integration.
+
+The file `lovelace/nanopid_dashboard.yaml` in this repo is provided as a manual reference for custom modifications.
+
+Required HACS frontend cards (install these before setting up the integration):
 - [layout-card](https://github.com/thomasloven/lovelace-layout-card)
 - [apexcharts-card](https://github.com/RomRider/apexcharts-card)
 - [lovelace-mushroom](https://github.com/piitaya/lovelace-mushroom)
@@ -87,21 +91,21 @@ Required HACS frontend cards:
 
 ---
 
-## Bundled Start Script
+## Bundled Start
 
-The `packages/nanopid_bundle_start.yaml` file provides an HA script that reads the current values of all select/number entities and sends them atomically with the start command, ensuring the device starts with exactly the configuration shown on the dashboard.
+The **Start** button on the dashboard calls the built-in HA service `nanopid.bundled_start`.
 
-**Setup:**
-1. Copy the file to `config/packages/nanopid_bundle_start.yaml`
-2. Ensure your `configuration.yaml` includes:
-   ```yaml
-   homeassistant:
-     packages: !include_dir_named packages
-   ```
-3. Replace `YOUR_DEVICE_MAC` in the file with your device MAC (e.g. `24587c5cd104`)
-4. Restart HA
+This service is registered automatically by the integration at startup. It reads the current values of all select/number entities (setpoint, mode, direction, etc.) and sends a single atomic JSON command to the device — with no MAC address hardcoded anywhere.
 
-The dashboard Start button calls `script.nanopid_bundled_start` automatically.
+No YAML packages, no manual editing, no per-user configuration needed. It works out of the box after the config flow.
+
+For multi-device installations (more than one NanoPID), pass `device_id` to target a specific device:
+
+```yaml
+service: nanopid.bundled_start
+data:
+  device_id: "<ha_device_id>"   # found in Settings → Devices → NanoPID → device info
+```
 
 ---
 
