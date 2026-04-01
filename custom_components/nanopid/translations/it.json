@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configurazione NanoPID Controller",
+        "description": "Inserisci l'indirizzo MAC del tuo NanoPID (indicato sull'etichetta del dispositivo o nel log seriale al boot).",
+        "data": {
+          "device_mac": "Indirizzo MAC dispositivo (12 caratteri hex, es. 24587c5cd104)",
+          "device_name": "Nome dispositivo"
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Indirizzo MAC non valido. Devono essere esattamente 12 caratteri esadecimali (es. 24587c5cd104)."
+    },
+    "abort": {
+      "already_configured": "Questo dispositivo NanoPID è già configurato."
+    }
+  }
+}

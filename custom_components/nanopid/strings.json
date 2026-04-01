@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "NanoPID Controller Setup",
+        "description": "Enter the MAC address of your NanoPID device (printed on the label or shown in the device serial log at boot).",
+        "data": {
+          "device_mac": "Device MAC Address (12 hex chars, e.g. 24587c5cd104)",
+          "device_name": "Device Name"
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Invalid MAC address. Must be exactly 12 hexadecimal characters (e.g. 24587c5cd104)."
+    },
+    "abort": {
+      "already_configured": "This NanoPID device is already configured."
+    }
+  }
+}

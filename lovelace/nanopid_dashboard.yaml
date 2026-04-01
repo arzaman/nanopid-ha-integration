@@ -1,0 +1,400 @@
+###############################################################################
+# NanoPID Controller — Lovelace Dashboard v5d (HACS integration edition)
+#
+# Dipendenze HACS: layout-card, apexcharts-card, lovelace-mushroom, stack-in-card
+# Layout: CSS Grid 4 colonne
+#
+# Entity IDs basati su device_name = "NanoPID" (default).
+# Se usi un nome diverso nella config, adatta il prefisso di conseguenza
+# (es. device_name "Forno" → sensor.forno_temperature, ecc.)
+###############################################################################
+
+title: SmartPID Nano
+views:
+  - title: NanoPID
+    icon: mdi:thermostat
+    path: nanopid
+
+    type: custom:layout-card
+    layout_type: custom:grid-layout
+    layout:
+      grid-template-columns: repeat(4, 1fr)
+      grid-template-rows: auto
+      gap: 12px
+      margin: 0
+
+    cards:
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 1. INTESTAZIONE — span 4
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: custom:mushroom-title-card
+        title: SmartPID Nano
+        subtitle: Controller di Processo Termico
+        title_tap_action:
+          action: none
+        view_layout:
+          grid-column: span 4
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 2. CHIPS ROW — AC detected | Alarm | heap — span 4
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: custom:mushroom-chips-card
+        chips:
+          - type: entity
+            entity: binary_sensor.nanopid_ac_detected
+            icon: mdi:sine-wave
+            content_info: name
+            tap_action:
+              action: more-info
+          - type: template
+            content: >
+              {% set s = states('sensor.nanopid_alarm_status') | lower %}
+              {% if s in ['over_temp','under_temp','sensor_fail'] %}
+                {{ states('sensor.nanopid_alarm_status') | upper }}
+              {% else %}
+                OK
+              {% endif %}
+            icon: >
+              {% set s = states('sensor.nanopid_alarm_status') | lower %}
+              {% if s in ['over_temp','under_temp','sensor_fail'] %}
+                mdi:alarm-light
+              {% else %}
+                mdi:shield-check
+              {% endif %}
+            icon_color: >
+              {% set s = states('sensor.nanopid_alarm_status') | lower %}
+              {% if s in ['over_temp','under_temp','sensor_fail'] %}
+                red
+              {% else %}
+                green
+              {% endif %}
+            tap_action:
+              action: more-info
+              entity: sensor.nanopid_alarm_status
+          - type: spacer
+          - type: entity
+            entity: sensor.nanopid_free_heap
+            icon: mdi:memory
+            content_info: state
+        alignment: start
+        view_layout:
+          grid-column: span 4
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 3a. PROCESS STATUS — span 2
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: custom:mushroom-template-card
+        primary: >
+          {% set s = states('sensor.nanopid_process_status') | lower %}
+          {% if 'pid run' in s %}        PID — Controllo Attivo
+          {% elif 'hys' in s and 'run' in s %} Isteresi — Controllo Attivo
+          {% elif 'pid pause' in s %}    PID — In Pausa
+          {% elif 'hys' in s and 'pause' in s %} Isteresi — In Pausa
+          {% elif 'idle' in s %}         Sistema in Attesa
+          {% elif 'alarm' in s %}        ALLARME — Uscite Disabilitate
+          {% elif 'autotune' in s %}     AutoTune in Corso
+          {% else %} {{ states('sensor.nanopid_process_status') }}
+          {% endif %}
+        secondary: >
+          {% set s    = states('sensor.nanopid_process_status') | lower %}
+          {% set tgt  = states('select.nanopid_target_mode') %}
+          {% set sp   = states('number.nanopid_main_setpoint') %}
+          {% set pwr  = states('sensor.nanopid_power_output') %}
+          {% set ctrl = states('select.nanopid_control_mode') %}
+          {% set dir  = states('select.nanopid_direction') %}
+          {% set beh  = states('select.nanopid_start_behaviour') %}
+          {% set prof = states('select.nanopid_profile_type') %}
+          {% if 'run' in s %}
+            SP: {{ sp }} °C · PWM: {{ pwr }} % · {{ ctrl }} · {{ dir }} · {{ beh }} · {{ prof }}
+          {% elif 'pause' in s %}
+            Sospeso · SP: {{ sp }} °C · {{ ctrl }} · {{ dir }} · {{ beh }} · {{ prof }}
+          {% elif 'idle' in s %}
+            Idle · T: {{ states('sensor.nanopid_temperature') }} °C
+          {% elif 'alarm' in s %}
+            Verificare sensore · premere Riconosce Allarme
+          {% else %}
+            {{ states('sensor.nanopid_process_status') }}
+          {% endif %}
+        icon: >
+          {% set s = states('sensor.nanopid_process_status') | lower %}
+          {% if 'run' in s %}        mdi:play-circle
+          {% elif 'pause' in s %}    mdi:pause-circle
+          {% elif 'idle' in s %}     mdi:stop-circle-outline
+          {% elif 'alarm' in s %}    mdi:alarm-light
+          {% elif 'autotune' in s %} mdi:auto-fix
+          {% else %}                 mdi:state-machine
+          {% endif %}
+        icon_color: >
+          {% set s = states('sensor.nanopid_process_status') | lower %}
+          {% if 'run' in s %}        green
+          {% elif 'pause' in s %}    orange
+          {% elif 'idle' in s %}     grey
+          {% elif 'alarm' in s %}    red
+          {% elif 'autotune' in s %} purple
+          {% else %}                 blue
+          {% endif %}
+        layout: horizontal
+        tap_action:
+          action: more-info
+          entity: sensor.nanopid_process_status
+        view_layout:
+          grid-column: span 2
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 3b. ULTIMO EVENTO — span 2
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: custom:mushroom-template-card
+        primary: >
+          {{ states('sensor.nanopid_process_status') }}
+        secondary: >
+          {% set alarm = states('sensor.nanopid_alarm_status') %}
+          {{ alarm }}
+          · {{ relative_time(states.sensor.nanopid_process_status.last_changed) }}
+        icon: mdi:history
+        icon_color: grey
+        layout: horizontal
+        tap_action:
+          action: more-info
+          entity: sensor.nanopid_process_status
+        view_layout:
+          grid-column: span 2
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 4. GAUGE TEMPERATURA — span 1
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: gauge
+        entity: sensor.nanopid_temperature
+        name: Temperatura Processo
+        unit: "°C"
+        min: 0
+        max: 200
+        needle: true
+        severity:
+          green: 0
+          yellow: 150
+          red: 180
+        view_layout:
+          grid-column: span 1
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 5. GAUGE POTENZA — span 1
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: gauge
+        entity: sensor.nanopid_power_output
+        name: Potenza Uscita
+        unit: "%"
+        min: 0
+        max: 100
+        needle: true
+        severity:
+          green: 0
+          yellow: 70
+          red: 90
+        view_layout:
+          grid-column: span 1
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 6. SETPOINT + MODALITÀ — stack-in-card, span 1
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: custom:stack-in-card
+        mode: vertical
+        cards:
+          - type: custom:mushroom-number-card
+            entity: number.nanopid_main_setpoint
+            name: Setpoint Target (°C)
+            icon: mdi:target
+            icon_color: amber
+            display_mode: slider
+            fill_container: false
+          - type: custom:mushroom-select-card
+            entity: select.nanopid_target_mode
+            name: Modalità Operativa
+            icon: mdi:swap-horizontal
+            icon_color: blue
+        view_layout:
+          grid-column: span 1
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 7. PULSANTI CONTROLLO — stack-in-card, span 1
+      #    Start usa il bundled start script (sync config → device)
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: custom:stack-in-card
+        mode: vertical
+        cards:
+          - type: custom:mushroom-template-card
+            primary: Start
+            secondary: Avvia con sync config
+            icon: mdi:play-circle
+            icon_color: green
+            layout: horizontal
+            tap_action:
+              action: call-service
+              service: script.nanopid_bundled_start
+          - type: custom:mushroom-template-card
+            primary: Stop
+            secondary: Ferma processo
+            icon: mdi:stop-circle
+            icon_color: red
+            layout: horizontal
+            tap_action:
+              action: call-service
+              service: button.press
+              target:
+                entity_id: button.nanopid_stop
+          - type: custom:mushroom-template-card
+            primary: Pausa
+            secondary: Sospendi
+            icon: mdi:pause-circle
+            icon_color: orange
+            layout: horizontal
+            tap_action:
+              action: call-service
+              service: button.press
+              target:
+                entity_id: button.nanopid_pause
+          - type: custom:mushroom-template-card
+            primary: Riprendi
+            secondary: Continua processo
+            icon: mdi:play-pause
+            icon_color: cyan
+            layout: horizontal
+            tap_action:
+              action: call-service
+              service: button.press
+              target:
+                entity_id: button.nanopid_resume
+        view_layout:
+          grid-column: span 1
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 8. GRAFICO UNIFICATO — apexcharts-card, span 4
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Andamento Processo — Ultime 2 Ore
+          show_states: true
+          colorize_states: true
+        graph_span: 2h
+        update_interval: 10s
+        apex_config:
+          chart:
+            height: 200px
+          stroke:
+            dashArray:
+              - 0
+              - 5
+              - 0
+          fill:
+            type:
+              - solid
+              - solid
+              - gradient
+            gradient:
+              shadeIntensity: 0.1
+              opacityFrom: 0.3
+              opacityTo: 0.05
+        yaxis:
+          - id: temp_axis
+            min: 0
+            max: 200
+            decimals: 1
+          - id: pwr_axis
+            min: 0
+            max: 100
+            decimals: 0
+            opposite: true
+        series:
+          - entity: sensor.nanopid_temperature
+            name: Temperatura (°C)
+            yaxis_id: temp_axis
+            color: "#1D9E75"
+            stroke_width: 2
+            type: line
+          - entity: number.nanopid_main_setpoint
+            name: Setpoint (°C)
+            yaxis_id: temp_axis
+            color: "#378ADD"
+            stroke_width: 1.5
+            type: line
+          - entity: sensor.nanopid_power_output
+            name: Potenza (%)
+            yaxis_id: pwr_axis
+            color: "#BA7517"
+            stroke_width: 2
+            type: area
+        view_layout:
+          grid-column: span 4
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 9. PARAMETRI DI CONTROLLO — griglia 2×2, span 2
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: custom:stack-in-card
+        mode: vertical
+        title: Parametri di Controllo
+        cards:
+          - type: custom:stack-in-card
+            mode: horizontal
+            cards:
+              - type: custom:mushroom-select-card
+                entity: select.nanopid_control_mode
+                name: Modalità Controllo
+                icon: mdi:tune-variant
+                icon_color: indigo
+              - type: custom:mushroom-select-card
+                entity: select.nanopid_direction
+                name: Direzione
+                icon: mdi:thermometer-lines
+                icon_color: deep-orange
+          - type: custom:stack-in-card
+            mode: horizontal
+            cards:
+              - type: custom:mushroom-select-card
+                entity: select.nanopid_start_behaviour
+                name: Avvio
+                icon: mdi:play-speed
+                icon_color: teal
+              - type: custom:mushroom-select-card
+                entity: select.nanopid_profile_type
+                name: Tipo Profilo
+                icon: mdi:chart-timeline-variant
+                icon_color: purple
+        view_layout:
+          grid-column: span 2
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 10. SOGLIE ALLARME — span 1
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: custom:stack-in-card
+        mode: vertical
+        title: Soglie Allarme
+        cards:
+          - type: custom:mushroom-number-card
+            entity: number.nanopid_alarm_th_low
+            name: Soglia Bassa (°C)
+            icon: mdi:thermometer-low
+            icon_color: blue
+            display_mode: buttons
+          - type: custom:mushroom-number-card
+            entity: number.nanopid_alarm_th_high
+            name: Soglia Alta (°C)
+            icon: mdi:thermometer-high
+            icon_color: red
+            display_mode: buttons
+        view_layout:
+          grid-column: span 1
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # 11. DIAGNOSTICA — span 1
+      # ═══════════════════════════════════════════════════════════════════════
+      - type: custom:mushroom-entity-card
+        entity: sensor.nanopid_free_heap
+        name: Heap Libero
+        icon: mdi:memory
+        icon_color: grey
+        secondary_info: last-changed
+        tap_action:
+          action: more-info
+        view_layout:
+          grid-column: span 1
