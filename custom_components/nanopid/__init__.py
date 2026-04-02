@@ -276,12 +276,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register the service once; subsequent entries reuse the same registration
     if not hass.services.has_service(DOMAIN, SERVICE_BUNDLED_START):
+        async def _handle_bundled_start(call: ServiceCall) -> None:
+            await _async_handle_bundled_start(hass, call)
+
         hass.services.async_register(
             DOMAIN,
             SERVICE_BUNDLED_START,
-            lambda call: hass.async_create_task(
-                _async_handle_bundled_start(hass, call)
-            ),
+            _handle_bundled_start,
             schema=SERVICE_BUNDLED_START_SCHEMA,
         )
 
