@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -20,18 +21,30 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import NanoPIDCoordinator
 from .const import DOMAIN, MANUFACTURER, MODEL, TOPIC_CONFIG, TOPIC_SETPOINT
 
+_LOGGER = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class NanoPIDNumberDescription(NumberEntityDescription):
     """Extends NumberEntityDescription with MQTT helpers."""
+
     status_key: str = ""
     command_topic_tpl: str = TOPIC_CONFIG
     command_payload_fn: Callable[[float], str] | None = None
-    # If True, coordinator updates are filtered:
-    #   - ignored when fsm=0 (device IDLE, reports sp=0 meaninglessly)
-    #   - ignored when reported sp=0 while device is running (firmware glitch)
-    # This replaces the old time-based optimistic guard which was fragile.
-    guard_zero_sp: bool = False
+    # When True, two independent guards are active for the setpoint entity:
+    #
+    # Guard A — coordinator → entity:
+    #   Reject sp=0 from the status topic.  The firmware reports sp=0 in
+    #   IDLE and occasionally during RUN transitions; accepting these would
+    #   corrupt the slider position and trigger guard B below.
+    #
+    # Guard B — slider → device:
+    #   Reject set_value(0) when the entity already holds a non-zero SP and
+    #   the device is not in Manual Dimmer mode (where 0 % power is valid).
+    #   The mushroom-number-card slider emits a ghost set_value(0) event
+    #   before the real value on every interaction; without this guard that
+    #   zero is published to the controller and resets the running setpoint.
+    filter_zero_sp: bool = False
 
 
 def _plain_float(v: float) -> str:
@@ -58,7 +71,7 @@ NUMBER_DESCRIPTIONS: tuple[NanoPIDNumberDescription, ...] = (
         status_key="sp",
         command_topic_tpl=TOPIC_SETPOINT,
         command_payload_fn=_plain_float,
-        guard_zero_sp=True,
+        filter_zero_sp=True,
     ),
     NanoPIDNumberDescription(
         key="alarm_th_low",
@@ -133,13 +146,33 @@ class NanoPIDNumber(NumberEntity):
         return self._current_value
 
     async def async_set_native_value(self, value: float) -> None:
-        # Optimistic update: reflect new value in HA immediately.
+        """Handle user input from the dashboard slider or box."""
+        desc = self.entity_description
+
+        # Guard B: reject ghost set_value(0) from the mushroom slider.
+        # The slider emits a spurious zero before the real value on every
+        # drag interaction.  We drop it when:
+        #   - filter_zero_sp is set (main_setpoint only)
+        #   - we already hold a valid non-zero setpoint
+        #   - the device is not in Manual Dimmer mode (sp=0 → 0 % power is valid)
+        if desc.filter_zero_sp and value == 0.0:
+            current = self._current_value
+            in_dimmer = "Dimmer" in str(self._coordinator.data.get("tgt", ""))
+            if current is not None and current != 0.0 and not in_dimmer:
+                _LOGGER.debug(
+                    "NanoPID %s: dropping ghost set_value(0) — current SP %.1f, mode=%s",
+                    self._coordinator.mac,
+                    current,
+                    self._coordinator.data.get("tgt", "?"),
+                )
+                return
+
+        # Optimistic update: reflect the new value in HA before device confirms.
         self._current_value = value
         self.async_write_ha_state()
 
         from homeassistant.components import mqtt
 
-        desc = self.entity_description
         topic = desc.command_topic_tpl.format(mac=self._coordinator.mac)
         payload = desc.command_payload_fn(value) if desc.command_payload_fn else str(value)
         await mqtt.async_publish(self.hass, topic, payload, qos=1)
@@ -155,20 +188,23 @@ class NanoPIDNumber(NumberEntity):
 
     @callback
     def _async_update(self) -> None:
+        """Receive a new status payload from the coordinator."""
         raw = self._coordinator.data.get(self.entity_description.status_key)
-        if raw is not None:
-            value = float(raw)
-            if self.entity_description.guard_zero_sp:
-                fsm = int(self._coordinator.data.get("fsm", 0))
-                # Accept coordinator SP only when:
-                #   - first load (_current_value is None): always accept to initialise
-                #   - device is actively running (fsm > 0) AND sp is non-zero
-                #
-                # Reject when:
-                #   - fsm=0 (IDLE): device always reports sp=0, meaningless
-                #   - sp=0 while running: transient firmware glitch, keep last good value
-                if self._current_value is None or (fsm != 0 and value != 0.0):
-                    self._current_value = value
-            else:
+        if raw is None:
+            self.async_write_ha_state()
+            return
+
+        value = float(raw)
+
+        if self.entity_description.filter_zero_sp:
+            # Guard A: reject sp=0 from the coordinator.
+            # The firmware always reports sp=0 in IDLE and may briefly report
+            # sp=0 during RUN transitions.  Accepting these would reposition
+            # the slider to 0 and trigger guard B ghost events on next interaction.
+            # Accept only non-zero values; the user-set value is preserved otherwise.
+            if value != 0.0:
                 self._current_value = value
+        else:
+            self._current_value = value
+
         self.async_write_ha_state()
