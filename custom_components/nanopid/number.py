@@ -138,19 +138,21 @@ class NanoPIDNumber(NumberEntity):
         return self._current_value
 
     async def async_set_native_value(self, value: float) -> None:
+        # Optimistic update FIRST: set local value and protection window before
+        # the MQTT publish.  The publish is async and yields to the event loop,
+        # so the coordinator callback can fire during the await — overwriting
+        # _current_value with stale data or sp=0 from the firmware.  Setting the
+        # guard here closes that race window completely.
+        self._current_value = value
+        self._optimistic_until = time.monotonic() + 10.0
+        self.async_write_ha_state()
+
         from homeassistant.components import mqtt
 
         desc = self.entity_description
         topic = desc.command_topic_tpl.format(mac=self._coordinator.mac)
         payload = desc.command_payload_fn(value) if desc.command_payload_fn else str(value)
         await mqtt.async_publish(self.hass, topic, payload, qos=1)
-        # Optimistic update: reflect new value immediately and protect it from
-        # coordinator overwrites for 10 s (= 2 device status cycles at 5 s each).
-        # Needed in both IDLE and RUN: firmware may publish sp=0 for 1-2 cycles
-        # after receiving a setpoint command before settling on the new value.
-        self._current_value = value
-        self._optimistic_until = time.monotonic() + 10.0
-        self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
         self._remove_listener = self._coordinator.async_add_listener(
