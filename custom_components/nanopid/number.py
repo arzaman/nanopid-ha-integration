@@ -1,6 +1,7 @@
 """Number platform for NanoPID — setpoint and alarm thresholds."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -23,6 +24,10 @@ from .const import DOMAIN, MANUFACTURER, MODEL, TOPIC_CONFIG, TOPIC_SETPOINT
 
 _LOGGER = logging.getLogger(__name__)
 
+# How long to wait after the last set_value call before publishing to the device.
+# Coalesces rapid-fire slider events (mushroom emits one per pixel of drag).
+_SETPOINT_DEBOUNCE_S = 0.15
+
 
 @dataclass(frozen=True)
 class NanoPIDNumberDescription(NumberEntityDescription):
@@ -31,20 +36,11 @@ class NanoPIDNumberDescription(NumberEntityDescription):
     status_key: str = ""
     command_topic_tpl: str = TOPIC_CONFIG
     command_payload_fn: Callable[[float], str] | None = None
-    # When True, two independent guards are active for the setpoint entity:
-    #
-    # Guard A — coordinator → entity:
-    #   Reject sp=0 from the status topic.  The firmware reports sp=0 in
-    #   IDLE and occasionally during RUN transitions; accepting these would
-    #   corrupt the slider position and trigger guard B below.
-    #
-    # Guard B — slider → device:
-    #   Reject set_value(0) when the entity already holds a non-zero SP and
-    #   the device is not in Manual Dimmer mode (where 0 % power is valid).
-    #   The mushroom-number-card slider emits a ghost set_value(0) event
-    #   before the real value on every interaction; without this guard that
-    #   zero is published to the controller and resets the running setpoint.
-    filter_zero_sp: bool = False
+    # Mark the main setpoint entity.  Enables:
+    #   • debounced publish (coalesces rapid slider input events)
+    #   • one-shot coordinator init (coordinator only sets the value once,
+    #     on the first non-zero reading; after that the entity owns its state)
+    is_setpoint: bool = False
 
 
 def _plain_float(v: float) -> str:
@@ -71,7 +67,7 @@ NUMBER_DESCRIPTIONS: tuple[NanoPIDNumberDescription, ...] = (
         status_key="sp",
         command_topic_tpl=TOPIC_SETPOINT,
         command_payload_fn=_plain_float,
-        filter_zero_sp=True,
+        is_setpoint=True,
     ),
     NanoPIDNumberDescription(
         key="alarm_th_low",
@@ -131,6 +127,9 @@ class NanoPIDNumber(NumberEntity):
         self._attr_unique_id = f"{coordinator.mac}_{description.key}"
         self._remove_listener: Callable | None = None
         self._current_value: float | None = None
+        # Setpoint-specific state
+        self._sp_inited: bool = False          # True once coordinator gave us a non-zero SP
+        self._publish_handle: asyncio.TimerHandle | None = None  # debounce handle
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -146,33 +145,50 @@ class NanoPIDNumber(NumberEntity):
         return self._current_value
 
     async def async_set_native_value(self, value: float) -> None:
-        """Handle user input from the dashboard slider or box."""
+        """Called by HA whenever the user changes the entity value."""
         desc = self.entity_description
 
-        # Guard B: reject ghost set_value(0) from the mushroom slider.
-        # The slider emits a spurious zero before the real value on every
-        # drag interaction.  We drop it when:
-        #   - filter_zero_sp is set (main_setpoint only)
-        #   - we already hold a valid non-zero setpoint
-        #   - the device is not in Manual Dimmer mode (sp=0 → 0 % power is valid)
-        if desc.filter_zero_sp and value == 0.0:
-            current = self._current_value
-            in_dimmer = "Dimmer" in str(self._coordinator.data.get("tgt", ""))
-            if current is not None and current != 0.0 and not in_dimmer:
-                _LOGGER.debug(
-                    "NanoPID %s: dropping ghost set_value(0) — current SP %.1f, mode=%s",
-                    self._coordinator.mac,
-                    current,
-                    self._coordinator.data.get("tgt", "?"),
-                )
-                return
-
-        # Optimistic update: reflect the new value in HA before device confirms.
+        # Always update local state immediately so the dashboard reflects the
+        # user's intent without waiting for the device to confirm.
         self._current_value = value
+        if desc.is_setpoint:
+            self._sp_inited = True  # user has spoken; stop accepting coordinator updates
         self.async_write_ha_state()
 
+        if desc.is_setpoint:
+            # Debounced publish: the mushroom slider fires one event per pixel of
+            # drag.  We wait for 150 ms of silence, then publish only the final
+            # value.  This naturally coalesces any burst of events (ghost or real)
+            # so the device receives exactly one command per user gesture.
+            if self._publish_handle is not None:
+                self._publish_handle.cancel()
+            self._publish_handle = self.hass.loop.call_later(
+                _SETPOINT_DEBOUNCE_S,
+                lambda: self.hass.async_create_task(self._async_publish_sp()),
+            )
+        else:
+            # Alarm thresholds: no debounce needed, publish directly.
+            await self._async_publish(value)
+
+    async def _async_publish_sp(self) -> None:
+        """Publish the current setpoint to the device (called after debounce window)."""
+        self._publish_handle = None
+        value = self._current_value
+        if value is None:
+            return
+        await self._async_publish(value)
+        _LOGGER.debug(
+            "NanoPID %s: setpoint → %.2f published to %s",
+            self._coordinator.mac,
+            value,
+            self.entity_description.command_topic_tpl.format(mac=self._coordinator.mac),
+        )
+
+    async def _async_publish(self, value: float) -> None:
+        """Low-level MQTT publish helper."""
         from homeassistant.components import mqtt
 
+        desc = self.entity_description
         topic = desc.command_topic_tpl.format(mac=self._coordinator.mac)
         payload = desc.command_payload_fn(value) if desc.command_payload_fn else str(value)
         await mqtt.async_publish(self.hass, topic, payload, qos=1)
@@ -185,26 +201,25 @@ class NanoPIDNumber(NumberEntity):
     async def async_will_remove_from_hass(self) -> None:
         if self._remove_listener:
             self._remove_listener()
+        if self._publish_handle is not None:
+            self._publish_handle.cancel()
+            self._publish_handle = None
 
     @callback
     def _async_update(self) -> None:
         """Receive a new status payload from the coordinator."""
         raw = self._coordinator.data.get(self.entity_description.status_key)
-        if raw is None:
-            self.async_write_ha_state()
-            return
-
-        value = float(raw)
-
-        if self.entity_description.filter_zero_sp:
-            # Guard A: reject sp=0 from the coordinator.
-            # The firmware always reports sp=0 in IDLE and may briefly report
-            # sp=0 during RUN transitions.  Accepting these would reposition
-            # the slider to 0 and trigger guard B ghost events on next interaction.
-            # Accept only non-zero values; the user-set value is preserved otherwise.
-            if value != 0.0:
+        if raw is not None:
+            value = float(raw)
+            if self.entity_description.is_setpoint:
+                # One-shot init: accept the first non-zero SP from the device
+                # (e.g., HA restarts while device is already running).
+                # Once the user has set a value (_sp_inited=True), we stop
+                # accepting coordinator updates entirely — the entity owns its
+                # own state and only the user can change it.
+                if not self._sp_inited and value != 0.0:
+                    self._current_value = value
+                    self._sp_inited = True
+            else:
                 self._current_value = value
-        else:
-            self._current_value = value
-
         self.async_write_ha_state()
