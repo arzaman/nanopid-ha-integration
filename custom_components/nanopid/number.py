@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -118,6 +119,10 @@ class NanoPIDNumber(NumberEntity):
         self._remove_listener: Callable | None = None
         # Local value: updated immediately on user input (optimistic) and by coordinator
         self._current_value: float | None = None
+        # Monotonic timestamp until which coordinator updates are ignored after a
+        # user action — gives the device time to process the command and publish
+        # the updated value without the integration snapping back to stale data.
+        self._optimistic_until: float = 0.0
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -139,9 +144,12 @@ class NanoPIDNumber(NumberEntity):
         topic = desc.command_topic_tpl.format(mac=self._coordinator.mac)
         payload = desc.command_payload_fn(value) if desc.command_payload_fn else str(value)
         await mqtt.async_publish(self.hass, topic, payload, qos=1)
-        # Optimistic update: reflect new value immediately without waiting
-        # for the next coordinator push from the device
+        # Optimistic update: reflect new value immediately and protect it from
+        # coordinator overwrites for 10 s (= 2 device status cycles at 5 s each).
+        # Needed in both IDLE and RUN: firmware may publish sp=0 for 1-2 cycles
+        # after receiving a setpoint command before settling on the new value.
         self._current_value = value
+        self._optimistic_until = time.monotonic() + 10.0
         self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
@@ -159,11 +167,17 @@ class NanoPIDNumber(NumberEntity):
         raw = self._coordinator.data.get(self.entity_description.status_key)
         if raw is not None:
             if self.entity_description.preserve_on_idle:
-                # Device reports sp=0 in IDLE — do not overwrite a value the
-                # user has explicitly set; resume syncing only when running.
-                fsm = self._coordinator.data.get("fsm", 0)
-                if int(fsm) == 0 and self._current_value is not None:
+                # IDLE guard: device reports sp=0 when idle — never overwrite a
+                # user-set value in this state.
+                fsm = int(self._coordinator.data.get("fsm", 0))
+                if fsm == 0 and self._current_value is not None:
                     self.async_write_ha_state()
                     return
+            # Optimistic guard: ignore coordinator for 10 s after a user action.
+            # Covers both IDLE and RUN — firmware may publish sp=0 for 1-2 cycles
+            # after a setpoint command before reporting the confirmed new value.
+            if time.monotonic() < self._optimistic_until:
+                self.async_write_ha_state()
+                return
             self._current_value = float(raw)
         self.async_write_ha_state()
