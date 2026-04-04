@@ -111,6 +111,8 @@ class NanoPIDNumber(NumberEntity):
         self._coordinator = coordinator
         self._attr_unique_id = f"{coordinator.mac}_{description.key}"
         self._remove_listener: Callable | None = None
+        # Local value: updated immediately on user input (optimistic) and by coordinator
+        self._current_value: float | None = None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -123,10 +125,7 @@ class NanoPIDNumber(NumberEntity):
 
     @property
     def native_value(self) -> float | None:
-        raw = self._coordinator.data.get(self.entity_description.status_key)
-        if raw is None:
-            return None
-        return float(raw)
+        return self._current_value
 
     async def async_set_native_value(self, value: float) -> None:
         from homeassistant.components import mqtt
@@ -135,6 +134,10 @@ class NanoPIDNumber(NumberEntity):
         topic = desc.command_topic_tpl.format(mac=self._coordinator.mac)
         payload = desc.command_payload_fn(value) if desc.command_payload_fn else str(value)
         await mqtt.async_publish(self.hass, topic, payload, qos=1)
+        # Optimistic update: reflect new value immediately without waiting
+        # for the next coordinator push from the device
+        self._current_value = value
+        self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
         self._remove_listener = self._coordinator.async_add_listener(
@@ -147,4 +150,8 @@ class NanoPIDNumber(NumberEntity):
 
     @callback
     def _async_update(self) -> None:
+        # Sync with device-reported value from status JSON
+        raw = self._coordinator.data.get(self.entity_description.status_key)
+        if raw is not None:
+            self._current_value = float(raw)
         self.async_write_ha_state()
