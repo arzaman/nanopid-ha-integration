@@ -27,6 +27,10 @@ class NanoPIDNumberDescription(NumberEntityDescription):
     status_key: str = ""
     command_topic_tpl: str = TOPIC_CONFIG
     command_payload_fn: Callable[[float], str] | None = None
+    # If True, skip coordinator sync when device is in IDLE (fsm=0).
+    # Used for main_setpoint: device reports sp=0 in idle, which must not
+    # overwrite a value the user has just set via the slider.
+    preserve_on_idle: bool = False
 
 
 def _plain_float(v: float) -> str:
@@ -53,6 +57,7 @@ NUMBER_DESCRIPTIONS: tuple[NanoPIDNumberDescription, ...] = (
         status_key="sp",
         command_topic_tpl=TOPIC_SETPOINT,
         command_payload_fn=_plain_float,
+        preserve_on_idle=True,
     ),
     NanoPIDNumberDescription(
         key="alarm_th_low",
@@ -153,5 +158,12 @@ class NanoPIDNumber(NumberEntity):
         # Sync with device-reported value from status JSON
         raw = self._coordinator.data.get(self.entity_description.status_key)
         if raw is not None:
+            if self.entity_description.preserve_on_idle:
+                # Device reports sp=0 in IDLE — do not overwrite a value the
+                # user has explicitly set; resume syncing only when running.
+                fsm = self._coordinator.data.get("fsm", 0)
+                if int(fsm) == 0 and self._current_value is not None:
+                    self.async_write_ha_state()
+                    return
             self._current_value = float(raw)
         self.async_write_ha_state()
