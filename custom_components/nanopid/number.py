@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -28,10 +27,11 @@ class NanoPIDNumberDescription(NumberEntityDescription):
     status_key: str = ""
     command_topic_tpl: str = TOPIC_CONFIG
     command_payload_fn: Callable[[float], str] | None = None
-    # If True, skip coordinator sync when device is in IDLE (fsm=0).
-    # Used for main_setpoint: device reports sp=0 in idle, which must not
-    # overwrite a value the user has just set via the slider.
-    preserve_on_idle: bool = False
+    # If True, coordinator updates are filtered:
+    #   - ignored when fsm=0 (device IDLE, reports sp=0 meaninglessly)
+    #   - ignored when reported sp=0 while device is running (firmware glitch)
+    # This replaces the old time-based optimistic guard which was fragile.
+    guard_zero_sp: bool = False
 
 
 def _plain_float(v: float) -> str:
@@ -58,7 +58,7 @@ NUMBER_DESCRIPTIONS: tuple[NanoPIDNumberDescription, ...] = (
         status_key="sp",
         command_topic_tpl=TOPIC_SETPOINT,
         command_payload_fn=_plain_float,
-        preserve_on_idle=True,
+        guard_zero_sp=True,
     ),
     NanoPIDNumberDescription(
         key="alarm_th_low",
@@ -117,12 +117,7 @@ class NanoPIDNumber(NumberEntity):
         self._coordinator = coordinator
         self._attr_unique_id = f"{coordinator.mac}_{description.key}"
         self._remove_listener: Callable | None = None
-        # Local value: updated immediately on user input (optimistic) and by coordinator
         self._current_value: float | None = None
-        # Monotonic timestamp until which coordinator updates are ignored after a
-        # user action — gives the device time to process the command and publish
-        # the updated value without the integration snapping back to stale data.
-        self._optimistic_until: float = 0.0
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -138,13 +133,8 @@ class NanoPIDNumber(NumberEntity):
         return self._current_value
 
     async def async_set_native_value(self, value: float) -> None:
-        # Optimistic update FIRST: set local value and protection window before
-        # the MQTT publish.  The publish is async and yields to the event loop,
-        # so the coordinator callback can fire during the await — overwriting
-        # _current_value with stale data or sp=0 from the firmware.  Setting the
-        # guard here closes that race window completely.
+        # Optimistic update: reflect new value in HA immediately.
         self._current_value = value
-        self._optimistic_until = time.monotonic() + 10.0
         self.async_write_ha_state()
 
         from homeassistant.components import mqtt
@@ -165,21 +155,20 @@ class NanoPIDNumber(NumberEntity):
 
     @callback
     def _async_update(self) -> None:
-        # Sync with device-reported value from status JSON
         raw = self._coordinator.data.get(self.entity_description.status_key)
         if raw is not None:
-            if self.entity_description.preserve_on_idle:
-                # IDLE guard: device reports sp=0 when idle — never overwrite a
-                # user-set value in this state.
+            value = float(raw)
+            if self.entity_description.guard_zero_sp:
                 fsm = int(self._coordinator.data.get("fsm", 0))
-                if fsm == 0 and self._current_value is not None:
-                    self.async_write_ha_state()
-                    return
-            # Optimistic guard: ignore coordinator for 10 s after a user action.
-            # Covers both IDLE and RUN — firmware may publish sp=0 for 1-2 cycles
-            # after a setpoint command before reporting the confirmed new value.
-            if time.monotonic() < self._optimistic_until:
-                self.async_write_ha_state()
-                return
-            self._current_value = float(raw)
+                # Accept coordinator SP only when:
+                #   - first load (_current_value is None): always accept to initialise
+                #   - device is actively running (fsm > 0) AND sp is non-zero
+                #
+                # Reject when:
+                #   - fsm=0 (IDLE): device always reports sp=0, meaningless
+                #   - sp=0 while running: transient firmware glitch, keep last good value
+                if self._current_value is None or (fsm != 0 and value != 0.0):
+                    self._current_value = value
+            else:
+                self._current_value = value
         self.async_write_ha_state()
