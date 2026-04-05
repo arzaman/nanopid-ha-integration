@@ -41,11 +41,12 @@ def _fmt_sp(v: float) -> str:
 
     HA quantises slider values with  round(v / step) * step  which introduces
     binary floating-point noise:  43.3 → 43.300000000000004.
-    str() on that produces a 18-character string that overflows the firmware's
-    sscanf/atof input buffer, causing it to fall back to sp=0.
-    Rounding to 1 decimal place (matching native_step=0.1) removes the noise.
+    The firmware JSON parser expects {"val": X} — plain float payloads are
+    discarded and sp defaults to 0.  Rounding to 1 decimal place also removes
+    binary floating-point noise (e.g. 43.300000000000004) produced by HA's
+    slider quantisation step.
     """
-    return f"{round(v, 1):.1f}"
+    return json.dumps({"val": round(v, 1)})
 
 def _json_th_low(v: float) -> str:
     return json.dumps({"th_low": round(v, 1)})
