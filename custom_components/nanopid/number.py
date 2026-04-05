@@ -37,14 +37,12 @@ class NanoPIDNumberDescription(NumberEntityDescription):
 
 
 def _fmt_sp(v: float) -> str:
-    """Format a setpoint float for MQTT.
+    """Serialize a setpoint value for the firmware.
 
-    HA quantises slider values with  round(v / step) * step  which introduces
-    binary floating-point noise:  43.3 → 43.300000000000004.
-    The firmware JSON parser expects {"val": X} — plain float payloads are
-    discarded and sp defaults to 0.  Rounding to 1 decimal place also removes
-    binary floating-point noise (e.g. 43.300000000000004) produced by HA's
-    slider quantisation step.
+    The firmware expects JSON {"val": X} on the setpoint topic; plain float
+    strings are not accepted.  Rounding to 1 decimal place (matching
+    native_step=0.1) removes binary floating-point noise introduced by HA's
+    slider step quantisation (e.g. 43.3 / 0.1 * 0.1 → 43.300000000000004).
     """
     return json.dumps({"val": round(v, 1)})
 
@@ -152,7 +150,7 @@ class NanoPIDNumber(NumberEntity):
 
         desc = self.entity_description
         topic = desc.command_topic_tpl.format(mac=self._coordinator.mac)
-        payload = desc.command_payload_fn(value) if desc.command_payload_fn else _fmt_sp(value)
+        payload = desc.command_payload_fn(value)
         await mqtt.async_publish(self.hass, topic, payload, qos=1)
         _LOGGER.debug("NanoPID %s → %s : %s", self._coordinator.mac, topic, payload)
 
