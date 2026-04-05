@@ -1,7 +1,7 @@
 {
   "domain": "nanopid",
   "name": "NanoPID Controller",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "documentation": "https://github.com/arzaman/nanopid-ha-integration",
   "issue_tracker": "https://github.com/arzaman/nanopid-ha-integration/issues",
   "requirements": [],
